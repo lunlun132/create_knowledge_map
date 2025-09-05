@@ -5,15 +5,19 @@ import docx  # 导入docx库用于处理Word文档
 import uuid  # 导入uuid库用于生成唯一标识符
 import random
 import string  # 导入string库用于生成随机字符串
+import subprocess  # 导入subprocess库用于调用外部命令
 
+from cnocr import CnOcr  # 导入CnOcr库用于OCR识别
+from PIL import Image  # 导入PIL库用于处理图像
 from time import time
 from typing import Union
 from fastapi import APIRouter, UploadFile
 from PyPDF2 import PdfReader  # 导入PyPDF2库用于处理PDF文件
 from io import BytesIO  # 导入BytesIO用于处理二进制数据流
-
+from tempfile import NamedTemporaryFile  # 导入NamedTemporaryFile用于创建临时文件
 
 doc_process = APIRouter(prefix="/document", tags=["文档"])  # 创建一个APIRouter实例用来处理文档相关的路由，其中prefix表示路由的前缀，tags用于给路由打标签，方便文档分类
+ocr = CnOcr()  # 创建一个CnOcr实例用于OCR识别
 
 @doc_process.post(
     path="/pre_process", 
@@ -57,7 +61,7 @@ async def gen_doc_content(
                 text = page.extract_text() or ""  # 修复：避免None值拼接
                 content += text + "\n"  # 加换行区分页面，提升可读性
         
-        elif ext in [".docx"]:
+        elif ext == ".docx":
             doc = docx.Document(BytesIO(await file.read()))
             # 3.1 生成docx专属的唯一文件名（保持原有生成逻辑）
             name_prefix = str(uuid.uuid1()).replace("-", "")
@@ -106,11 +110,42 @@ async def gen_doc_content(
             # 3.6 列表转字符串（保持原有逻辑）
             content = "\n".join(content_list)
         
+        elif ext == ".doc":
+            with NamedTemporaryFile(delete=True) as tmp:
+                """
+                创建一个临时文件对象
+                delete=True表示文件在关闭后会自动删除
+                使用with确保文件在使用后会被正确关闭
+                """
+                tmp.write(await file.read())  # 异步读取上传的文件内容，并写入临时文件
+                tmp.flush()  # 确保所有写入的数据被保存到磁盘，清空缓冲区
+                # TODO: 此处依赖antiword工具，需确保服务器已安装（如未安装需补充安装逻辑或替换为其他库）
+                result = subprocess.run(f"antiword -mUTF-8 {tmp.name}", shell=True, capture_output=True, text=True)  # 将word文档转换为文本，指定输出编码为utf-8，tmp.name是临时文件的路径，允许通过shell执行命令
+                if result.returncode == 0:
+                    content = result.stdout  # 成功后，将转换后的文本内容赋值给 content 变量
+                else:
+                    # TODO: 补充处理转换失败的逻辑（如返回具体错误信息）
+                    content = ""
+        
+        elif ext in [".jpg", ".png"]:
+            # TODO: 可根据需要调整OCR模型参数（如识别语言、精度等）
+            result = ocr.ocr(Image.open(BytesIO(await file.read())))
+            content = ''.join([item['text'] for item in result])
+        
+        # 语音文件处理（待补充）
+        # elif ext in [".mp3", ".mp4", ".wav"]:
+        #     # TODO: 补充语音转文字逻辑（如使用 SpeechRecognition 库或API）
+        #     pass
+            
+        elif ext in ['.txt', '.md', '.html']:
+            # TODO: 对于html文件，可能需要补充标签清理逻辑（如使用BeautifulSoup）
+            content = (await file.read()).decode('utf-8')  # 直接读取文本文件内容
+        
         else:
             # 4. 处理不支持的文件格式
             return {
                 "code": 400,
-                "message": f"不支持{ext}格式，仅支持PDF和docx",
+                "message": f"不支持{ext}格式，仅支持PDF、docx、doc、jpg、png、txt、md、html",  # 修复原提示信息不全的问题
                 "data": None
             }
         
@@ -123,7 +158,7 @@ async def gen_doc_content(
             "message": "文件预处理成功",
             "data": {
                 "original_file_name": f"{file_name}{ext}",  # 原始完整文件名
-                "unique_file_name": unique_filename,  # docx专属唯一文件名（PDF为None）
+                "unique_file_name": unique_filename,  # docx专属唯一文件名（其他格式为None）
                 "content": content.strip(),  # 去除首尾空字符，优化结果
                 "content_length": len(content.strip()),  # 内容长度，方便校验
                 "sentence_size": sentence_size,  # 返回入参，保持接口一致性
@@ -133,6 +168,7 @@ async def gen_doc_content(
     
     except Exception as e:
         # 7. 捕获异常，返回错误信息
+        # TODO: 生产环境中可补充日志记录逻辑，便于排查问题
         return {
             "code": 500,
             "message": f"文件预处理失败：{str(e)}",
