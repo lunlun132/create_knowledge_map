@@ -1,5 +1,5 @@
 from fastapi import FastAPI
-from document_process import doc_process
+from app.document_process import doc_process
 
 app = FastAPI()
 
